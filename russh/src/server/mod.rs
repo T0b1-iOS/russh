@@ -755,6 +755,7 @@ where
         pending_reads: Vec::new(),
         pending_len: 0,
         channels: HashMap::new(),
+        reading: true,
     };
 
     let join = tokio::spawn(session.run(stream, handler));
