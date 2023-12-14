@@ -679,6 +679,7 @@ where
         pending_len: 0,
         channels: HashMap::new(),
         open_global_requests: VecDeque::new(),
+        reading: true,
     };
     let join = tokio::spawn(session.run(stream, handler));
 

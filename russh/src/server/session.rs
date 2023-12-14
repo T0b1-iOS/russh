@@ -20,6 +20,7 @@ pub struct Session {
     pub(crate) target_window_size: u32,
     pub(crate) pending_reads: Vec<CryptoVec>,
     pub(crate) pending_len: u32,
+    pub(crate) reading: bool,
     pub(crate) channels: HashMap<ChannelId, ChannelRef>,
     pub(crate) open_global_requests: VecDeque<GlobalRequestResponse>,
 }
@@ -65,6 +66,7 @@ pub enum Msg {
         language_tag: String,
     },
     Channel(ChannelId, ChannelMsg),
+    SetReading(bool),
 }
 
 impl From<(ChannelId, ChannelMsg)> for Msg {
@@ -81,6 +83,14 @@ pub struct Handle {
 }
 
 impl Handle {
+    /// Set whether the session will read from the underlying socket
+    pub async fn set_reading(&self, reading: bool) -> Result<(), ()> {
+        self.sender
+            .send(Msg::SetReading(reading))
+            .await
+            .map_err(|_| ())
+    }
+
     /// Send data to the session referenced by this handler.
     pub async fn data(&self, id: ChannelId, data: CryptoVec) -> Result<(), CryptoVec> {
         self.sender
@@ -372,6 +382,20 @@ impl Handle {
     }
 }
 
+// from futures::pending
+struct PendingReading<R: AsyncRead + Unpin> {
+    _data: core::marker::PhantomData<R>,
+}
+
+impl<R: AsyncRead + Unpin> Future for PendingReading<R> {
+    // from start_reading
+    type Output = Result<(usize, R, SSHBuffer, Box<dyn OpeningKey + Send>), Error>;
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Poll::Pending
+    }
+}
+
 impl Session {
     pub(crate) fn is_rekeying(&self) -> bool {
         if let Some(ref enc) = self.common.encrypted {
@@ -414,6 +438,8 @@ impl Session {
 
         let reading = start_reading(stream_read, buffer, opening_cipher);
         pin!(reading);
+        let pending_read = PendingReading::<SshRead<tokio::io::ReadHalf<R>>>{ _data: core::marker::PhantomData };
+        pin!(pending_read);
         let mut is_reading = None;
         let mut decomp = CryptoVec::new();
 
@@ -421,8 +447,9 @@ impl Session {
         while !self.common.disconnected {
             self.common.received_data = false;
             let mut sent_keepalive = false;
+            let read_enabled = self.reading;
             tokio::select! {
-                r = &mut reading => {
+                r = async { if read_enabled { (&mut reading).await } else { (&mut pending_read).await } } => {
                     let (stream_read, mut buffer, mut opening_cipher) = match r {
                         Ok((_, stream_read, buffer, opening_cipher)) => (stream_read, buffer, opening_cipher),
                         Err(e) => return Err(e.into())
@@ -536,6 +563,9 @@ impl Session {
                         Some(Msg::Disconnect {reason, description, language_tag}) => {
                             self.common.disconnect(reason, &description, &language_tag);
                         }
+                        Some(Msg::SetReading(reading)) => {
+                            self.reading = reading;
+                        }
                         Some(_) => {
                             // should be unreachable, since the receiver only gets
                             // messages from methods implemented within russh
@@ -599,6 +629,11 @@ impl Session {
     /// Get a handle to this session.
     pub fn handle(&self) -> Handle {
         self.sender.clone()
+    }
+
+    /// Set whether the session will read from the underlying socket
+    pub fn set_reading(&mut self, reading: bool) {
+        self.reading = reading;
     }
 
     pub fn writable_packet_size(&self, channel: &ChannelId) -> u32 {
