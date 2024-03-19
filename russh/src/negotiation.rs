@@ -158,7 +158,7 @@ pub(crate) trait Select {
 
     fn select<S: AsRef<str> + Copy>(a: &[S], b: &[u8]) -> Option<(bool, S)>;
 
-    fn read_kex(buffer: &[u8], pref: &Preferred) -> Result<Names, Error> {
+    fn read_kex(buffer: &[u8], pref: &Preferred, host_keys: Option<&[KeyPair]>) -> Result<Names, Error> {
         let mut r = buffer.reader(17);
         let kex_string = r.read_string()?;
         let (kex_both_first, kex_algorithm) = if let Some(x) = Self::select(pref.kex, kex_string) {
@@ -191,7 +191,12 @@ pub(crate) trait Select {
         }
 
         let key_string = r.read_string()?;
-        let (key_both_first, key_algorithm) = if let Some(x) = Self::select(pref.key, key_string) {
+        let key_selection = if let Some(host_keys) = host_keys {
+            Self::select_keys(pref.key, key_string, host_keys)
+        } else {
+            Self::select(pref.key, key_string)
+        };
+        let (key_both_first, key_algorithm) = if let Some(x) = key_selection {
             x
         } else {
             debug!(
@@ -273,6 +278,23 @@ pub(crate) trait Select {
             }
             _ => Err(Error::KexInit),
         }
+    }
+
+    fn select_keys<S: AsRef<str> + Copy>(server_list: &[S], client_list: &[u8], host_keys: &[KeyPair]) -> Option<(bool, S)> {
+        let mut both_first_choice = true;
+        for c in client_list.split(|&x| x == b',') {
+            for &s in server_list {
+                if !host_keys.iter().any(|kp| kp.name() == s.as_ref()) {
+                    // no key available so this was never offered to the client
+                    continue;
+                }
+                if c == s.as_ref().as_bytes() {
+                    return Some((both_first_choice, s));
+                }
+                both_first_choice = false
+            }
+        }
+        None
     }
 }
 
